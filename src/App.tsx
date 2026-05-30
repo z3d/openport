@@ -489,7 +489,6 @@ function AppSidebar({
   collectionsExpanded,
   onSelectRequest,
   onSelectCollection,
-  onNewCollection,
   onNewRequest,
   onToggleCollections,
   onLoadHistory
@@ -501,7 +500,6 @@ function AppSidebar({
   collectionsExpanded: boolean;
   onSelectRequest: (collectionId: string, request: RequestDraft) => void;
   onSelectCollection: (collection: Collection) => void;
-  onNewCollection: () => void;
   onNewRequest: (collectionId?: string) => void;
   onToggleCollections: () => void;
   onLoadHistory: (item: HistoryItem) => void;
@@ -537,7 +535,10 @@ function AppSidebar({
           <FileTextIcon className="size-4" />
           Collections
         </button>
-        <IconButton label="New collection" onClick={onNewCollection}>
+        <IconButton
+          label="New request"
+          onClick={() => onNewRequest(activeCollectionId)}
+        >
           <PlusIcon className="size-4" />
         </IconButton>
       </div>
@@ -773,21 +774,6 @@ export function App() {
     setRequestTab("Params");
   }
 
-  function createCollection() {
-    const nextCollection: Collection = {
-      id: uid("col"),
-      name: `Collection ${state.collections.length + 1}`,
-      requests: []
-    };
-
-    setState((current) => ({
-      ...current,
-      collections: [...current.collections, nextCollection]
-    }));
-    setCollectionsExpanded(true);
-    startNewRequest(nextCollection.id);
-  }
-
   function selectCollection(collection: Collection) {
     setActiveCollectionId(collection.id);
     setCollectionsExpanded(true);
@@ -837,7 +823,6 @@ export function App() {
           collections={state.collections}
           history={state.history}
           onLoadHistory={loadHistory}
-          onNewCollection={createCollection}
           onNewRequest={startNewRequest}
           onSelectCollection={selectCollection}
           onToggleCollections={() =>

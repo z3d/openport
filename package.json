@@ -11,6 +11,8 @@
     "build": "tsc && vite build && tsc -p electron/tsconfig.json",
     "preview": "vite preview --host 127.0.0.1",
     "start": "electron .",
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:dist": "playwright test",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis portable --x64"
   },
@@ -44,6 +46,7 @@
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
