@@ -3,6 +3,8 @@ import {
   ActivityLogIcon,
   ArchiveIcon,
   BookmarkIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   CodeIcon,
   CopyIcon,
   CounterClockwiseClockIcon,
@@ -482,16 +484,26 @@ function ResponseSkeleton() {
 function AppSidebar({
   collections,
   history,
+  activeCollectionId,
   activeRequestId,
+  collectionsExpanded,
   onSelectRequest,
+  onSelectCollection,
+  onNewCollection,
   onNewRequest,
+  onToggleCollections,
   onLoadHistory
 }: {
   collections: Collection[];
   history: HistoryItem[];
+  activeCollectionId: string;
   activeRequestId: string;
-  onSelectRequest: (request: RequestDraft) => void;
-  onNewRequest: () => void;
+  collectionsExpanded: boolean;
+  onSelectRequest: (collectionId: string, request: RequestDraft) => void;
+  onSelectCollection: (collection: Collection) => void;
+  onNewCollection: () => void;
+  onNewRequest: (collectionId?: string) => void;
+  onToggleCollections: () => void;
   onLoadHistory: (item: HistoryItem) => void;
 }) {
   return (
@@ -510,45 +522,81 @@ function AppSidebar({
         </div>
       </div>
 
-      <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-500">
+      <div className="flex items-center justify-between px-3 py-3">
+        <button
+          className="flex min-h-8 flex-1 items-center gap-2 rounded-md px-1 text-left text-xs font-semibold uppercase tracking-[0.1em] text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 active:translate-y-px"
+          type="button"
+          aria-expanded={collectionsExpanded}
+          onClick={onToggleCollections}
+        >
+          {collectionsExpanded ? (
+            <ChevronDownIcon className="size-4" />
+          ) : (
+            <ChevronRightIcon className="size-4" />
+          )}
           <FileTextIcon className="size-4" />
           Collections
-        </div>
-        <IconButton label="New request" onClick={onNewRequest}>
+        </button>
+        <IconButton label="New collection" onClick={onNewCollection}>
           <PlusIcon className="size-4" />
         </IconButton>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {collections.map((collection) => (
-          <div className="mb-4" key={collection.id}>
-            <div className="px-2 pb-1 text-xs font-medium text-zinc-500">
-              {collection.name}
-            </div>
-            <div className="space-y-1">
-              {collection.requests.map((request) => (
+        {collectionsExpanded &&
+          collections.map((collection) => (
+            <div className="mb-4" key={collection.id}>
+              <div className="mb-1 flex items-center gap-1">
                 <button
-                  className={`sidebar-item ${
-                    activeRequestId === request.id ? "sidebar-item-active" : ""
+                  className={`flex min-h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 text-left text-xs font-semibold transition hover:bg-zinc-100 active:translate-y-px ${
+                    activeCollectionId === collection.id
+                      ? "bg-zinc-100 text-zinc-950"
+                      : "text-zinc-500"
                   }`}
-                  key={request.id}
                   type="button"
-                  onClick={() => onSelectRequest(request)}
+                  onClick={() => onSelectCollection(collection)}
                 >
-                  <span
-                    className={`method-chip ${methodClass(request.method)}`}
-                  >
-                    {request.method}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-left">
-                    {request.name}
+                  <span className="min-w-0 truncate">{collection.name}</span>
+                  <span className="font-mono text-[11px] text-zinc-400">
+                    {collection.requests.length}
                   </span>
                 </button>
-              ))}
+                <IconButton
+                  label={`New request in ${collection.name}`}
+                  onClick={() => onNewRequest(collection.id)}
+                >
+                  <PlusIcon className="size-4" />
+                </IconButton>
+              </div>
+              <div className="space-y-1">
+                {collection.requests.length === 0 ? (
+                  <div className="px-2 py-2 text-xs text-zinc-400">
+                    No saved requests
+                  </div>
+                ) : (
+                  collection.requests.map((request) => (
+                    <button
+                      className={`sidebar-item ${
+                        activeRequestId === request.id ? "sidebar-item-active" : ""
+                      }`}
+                      key={request.id}
+                      type="button"
+                      onClick={() => onSelectRequest(collection.id, request)}
+                    >
+                      <span
+                        className={`method-chip ${methodClass(request.method)}`}
+                      >
+                        {request.method}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {request.name}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
       </div>
 
       <div className="border-t border-zinc-200 px-2 py-3">
@@ -590,6 +638,10 @@ export function App() {
   const [activeRequest, setActiveRequest] = useState<RequestDraft>(() =>
     cloneRequest(defaultState.collections[0].requests[0])
   );
+  const [activeCollectionId, setActiveCollectionId] = useState(
+    defaultState.collections[0].id
+  );
+  const [collectionsExpanded, setCollectionsExpanded] = useState(true);
   const [requestTab, setRequestTab] =
     useState<(typeof REQUEST_TABS)[number]>("Params");
   const [responseTab, setResponseTab] =
@@ -601,6 +653,12 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state]);
+
+  useEffect(() => {
+    if (!state.collections.some((collection) => collection.id === activeCollectionId)) {
+      setActiveCollectionId(state.collections[0]?.id ?? "");
+    }
+  }, [activeCollectionId, state.collections]);
 
   const resolvedPreview = useMemo(() => {
     const resolvedUrl = interpolate(activeRequest.url, state.environment);
@@ -622,22 +680,34 @@ export function App() {
     };
 
     setState((current) => {
-      const [firstCollection, ...rest] = current.collections.length
+      const collections = current.collections.length
         ? current.collections
         : defaultState.collections;
-      const existingIndex = firstCollection.requests.findIndex(
-        (item) => item.id === cleanRequest.id
-      );
-      const requests =
-        existingIndex >= 0
-          ? firstCollection.requests.map((item) =>
-              item.id === cleanRequest.id ? cleanRequest : item
-            )
-          : [cleanRequest, ...firstCollection.requests];
+      const targetCollectionId = activeCollectionId || collections[0]?.id;
+
+      if (!targetCollectionId) {
+        return current;
+      }
 
       return {
         ...current,
-        collections: [{ ...firstCollection, requests }, ...rest]
+        collections: collections.map((collection) => {
+          if (collection.id !== targetCollectionId) {
+            return collection;
+          }
+
+          const existingIndex = collection.requests.findIndex(
+            (item) => item.id === cleanRequest.id
+          );
+          const requests =
+            existingIndex >= 0
+              ? collection.requests.map((item) =>
+                  item.id === cleanRequest.id ? cleanRequest : item
+                )
+              : [cleanRequest, ...collection.requests];
+
+          return { ...collection, requests };
+        })
       };
     });
 
@@ -688,7 +758,10 @@ export function App() {
     }));
   }
 
-  function startNewRequest() {
+  function startNewRequest(collectionId = activeCollectionId) {
+    if (collectionId) {
+      setActiveCollectionId(collectionId);
+    }
     setActiveRequest(
       requestDraft({
         id: uid("req"),
@@ -696,6 +769,41 @@ export function App() {
         url: "{{baseUrl}}/anything"
       })
     );
+    setResponse(null);
+    setRequestTab("Params");
+  }
+
+  function createCollection() {
+    const nextCollection: Collection = {
+      id: uid("col"),
+      name: `Collection ${state.collections.length + 1}`,
+      requests: []
+    };
+
+    setState((current) => ({
+      ...current,
+      collections: [...current.collections, nextCollection]
+    }));
+    setCollectionsExpanded(true);
+    startNewRequest(nextCollection.id);
+  }
+
+  function selectCollection(collection: Collection) {
+    setActiveCollectionId(collection.id);
+    setCollectionsExpanded(true);
+
+    if (collection.requests[0]) {
+      setActiveRequest(cloneRequest(collection.requests[0]));
+    } else {
+      setActiveRequest(
+        requestDraft({
+          id: uid("req"),
+          name: "Untitled request",
+          url: "{{baseUrl}}/anything"
+        })
+      );
+    }
+
     setResponse(null);
     setRequestTab("Params");
   }
@@ -723,12 +831,20 @@ export function App() {
     <div className="min-h-[100dvh] bg-[#f7f7f5] text-zinc-950">
       <div className="grid min-h-[100dvh] grid-cols-1 lg:grid-cols-[282px_minmax(0,1fr)]">
         <AppSidebar
+          activeCollectionId={activeCollectionId}
           activeRequestId={activeRequest.id}
+          collectionsExpanded={collectionsExpanded}
           collections={state.collections}
           history={state.history}
           onLoadHistory={loadHistory}
+          onNewCollection={createCollection}
           onNewRequest={startNewRequest}
-          onSelectRequest={(request) => {
+          onSelectCollection={selectCollection}
+          onToggleCollections={() =>
+            setCollectionsExpanded((isExpanded) => !isExpanded)
+          }
+          onSelectRequest={(collectionId, request) => {
+            setActiveCollectionId(collectionId);
             setActiveRequest(cloneRequest(request));
             setResponse(null);
             setRequestTab("Params");
