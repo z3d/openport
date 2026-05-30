@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, net, protocol, shell } from "electron";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 type RequestHeader = {
   key: string;
@@ -27,6 +28,29 @@ const allowedMethods = new Set([
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "openport",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true
+    }
+  }
+]);
+
+function registerAppProtocol() {
+  protocol.handle("openport", (request) => {
+    const url = new URL(request.url);
+    const requestedPath =
+      decodeURIComponent(url.pathname) === "/"
+        ? "/index.html"
+        : decodeURIComponent(url.pathname);
+    const filePath = path.join(__dirname, "../dist", requestedPath);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+}
+
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1440,
@@ -51,7 +75,7 @@ function createWindow() {
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+    mainWindow.loadURL("openport://app/index.html");
   }
 }
 
@@ -149,6 +173,7 @@ ipcMain.handle("http:send", async (_event, request: ClientRequest) => {
 });
 
 app.whenReady().then(() => {
+  registerAppProtocol();
   createWindow();
 
   app.on("activate", () => {
