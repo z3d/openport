@@ -123,6 +123,35 @@ test("import loads collections from a file", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("a curl command can be imported", async ({ page }) => {
+  await page.getByRole("button", { name: "Import cURL" }).click();
+
+  await page
+    .getByLabel("cURL command")
+    .fill(
+      "curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d '{\"name\":\"ada\"}'"
+    );
+
+  await page.getByRole("button", { name: "Run cURL import" }).click();
+
+  await expect(page.getByLabel("URL")).toHaveValue(
+    "https://api.example.com/users"
+  );
+  await expect(page.getByLabel("Key").first()).toHaveValue("Content-Type");
+
+  await page.getByRole("button", { name: "Body" }).first().click();
+  await expect(page.getByLabel("Request body")).toHaveValue('{"name":"ada"}');
+});
+
+test("a bearer token auth can be configured", async ({ page }) => {
+  await page.getByRole("button", { name: "Auth" }).click();
+
+  await page.getByLabel("Auth type").selectOption("bearer");
+  await page.getByLabel("Token").fill("{{token}}");
+
+  await expect(page.getByLabel("Token")).toHaveValue("{{token}}");
+});
+
 test("an environment variable can be masked and revealed", async ({ page }) => {
   await page.getByRole("button", { name: "Env" }).click();
 

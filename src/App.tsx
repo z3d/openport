@@ -43,6 +43,12 @@ type KeyValueRow = {
   secret?: boolean;
 };
 
+type RequestAuth =
+  | { type: "none" }
+  | { type: "bearer"; token: string }
+  | { type: "basic"; username: string; password: string }
+  | { type: "apiKey"; key: string; value: string; in: "header" | "query" };
+
 type RequestDraft = {
   id: string;
   name: string;
@@ -51,6 +57,7 @@ type RequestDraft = {
   params: KeyValueRow[];
   headers: KeyValueRow[];
   body: string;
+  auth?: RequestAuth;
 };
 
 type Collection = {
@@ -78,7 +85,7 @@ type PersistedState = {
 type ResponseState = OpenPortResponse | null;
 
 const STORAGE_KEY = "openport:state:v1";
-const REQUEST_TABS = ["Params", "Headers", "Body", "Env"] as const;
+const REQUEST_TABS = ["Params", "Headers", "Auth", "Body", "Env"] as const;
 const RESPONSE_TABS = ["Body", "Headers"] as const;
 const METHODS: HttpMethod[] = [
   "GET",
@@ -116,6 +123,7 @@ function requestDraft(overrides: Partial<RequestDraft> = {}): RequestDraft {
     params: [row()],
     headers: [row("Accept", "application/json")],
     body: "{\n  \"ok\": true\n}",
+    auth: { type: "none" },
     ...overrides
   };
 }
@@ -222,6 +230,210 @@ function buildUrl(baseUrl: string, params: KeyValueRow[]) {
   } catch {
     return baseUrl;
   }
+}
+
+function applyAuth(
+  auth: RequestAuth | undefined,
+  headers: KeyValueRow[],
+  url: string,
+  environment: KeyValueRow[]
+): { headers: KeyValueRow[]; url: string } {
+  if (!auth || auth.type === "none") {
+    return { headers, url };
+  }
+
+  const resolve = (value: string) => interpolate(value, environment);
+  const nextHeaders = [...headers];
+
+  if (auth.type === "bearer") {
+    const token = resolve(auth.token).trim();
+    if (token) {
+      nextHeaders.push(row("Authorization", `Bearer ${token}`));
+    }
+    return { headers: nextHeaders, url };
+  }
+
+  if (auth.type === "basic") {
+    const encoded = btoa(
+      `${resolve(auth.username)}:${resolve(auth.password)}`
+    );
+    nextHeaders.push(row("Authorization", `Basic ${encoded}`));
+    return { headers: nextHeaders, url };
+  }
+
+  const key = resolve(auth.key).trim();
+  const value = resolve(auth.value);
+  if (!key) {
+    return { headers: nextHeaders, url };
+  }
+
+  if (auth.in === "query") {
+    return { headers: nextHeaders, url: buildUrl(url, [row(key, value)]) };
+  }
+
+  nextHeaders.push(row(key, value));
+  return { headers: nextHeaders, url };
+}
+
+function tokenizeCurl(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let started = false;
+  let quote: string | null = null;
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else if (char === "\\" && quote === '"' && input[i + 1] !== undefined) {
+        current += input[++i];
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+
+    if (char === "\\") {
+      if (input[i + 1] === "\n") {
+        i++;
+      } else if (input[i + 1] !== undefined) {
+        current += input[++i];
+        started = true;
+      }
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+
+    current += char;
+    started = true;
+  }
+
+  if (started) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+function parseCurl(input: string): Partial<RequestDraft> | null {
+  const tokens = tokenizeCurl(input.trim().replace(/^\$\s+/, ""));
+  if (!tokens.length || tokens[0] !== "curl") {
+    return null;
+  }
+
+  let method: HttpMethod | null = null;
+  let url = "";
+  let body = "";
+  let auth: RequestAuth | undefined;
+  const headers: KeyValueRow[] = [];
+  const valuelessFlags = new Set([
+    "--compressed",
+    "-L",
+    "--location",
+    "-s",
+    "--silent",
+    "-k",
+    "--insecure",
+    "-i",
+    "--include",
+    "-v",
+    "--verbose",
+    "-g",
+    "--globoff",
+    "-#",
+    "--progress-bar"
+  ]);
+
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    if (token === "-X" || token === "--request") {
+      const candidate = (tokens[++i] ?? "").toUpperCase();
+      if ((METHODS as string[]).includes(candidate)) {
+        method = candidate as HttpMethod;
+      }
+    } else if (token === "-H" || token === "--header") {
+      const header = tokens[++i] ?? "";
+      const splitAt = header.indexOf(":");
+      if (splitAt > -1) {
+        headers.push(
+          row(header.slice(0, splitAt).trim(), header.slice(splitAt + 1).trim())
+        );
+      }
+    } else if (
+      token === "-d" ||
+      token === "--data" ||
+      token === "--data-raw" ||
+      token === "--data-binary" ||
+      token === "--data-ascii"
+    ) {
+      body = tokens[++i] ?? "";
+    } else if (token === "-u" || token === "--user") {
+      const credential = tokens[++i] ?? "";
+      const splitAt = credential.indexOf(":");
+      auth = {
+        type: "basic",
+        username: splitAt > -1 ? credential.slice(0, splitAt) : credential,
+        password: splitAt > -1 ? credential.slice(splitAt + 1) : ""
+      };
+    } else if (token === "-A" || token === "--user-agent") {
+      headers.push(row("User-Agent", tokens[++i] ?? ""));
+    } else if (token === "-e" || token === "--referer") {
+      headers.push(row("Referer", tokens[++i] ?? ""));
+    } else if (token === "--url") {
+      url = tokens[++i] ?? "";
+    } else if (valuelessFlags.has(token)) {
+      // boolean flag, nothing to capture
+    } else if (!token.startsWith("-") && !url) {
+      url = token;
+    }
+  }
+
+  if (body && !method) {
+    method = "POST";
+  }
+
+  if (!url) {
+    return null;
+  }
+
+  if (!auth) {
+    const authHeaderIndex = headers.findIndex(
+      (header) => header.key.toLowerCase() === "authorization"
+    );
+    if (authHeaderIndex > -1) {
+      const headerValue = headers[authHeaderIndex].value;
+      const match = /^Bearer\s+(.+)$/i.exec(headerValue);
+      if (match) {
+        auth = { type: "bearer", token: match[1].trim() };
+        headers.splice(authHeaderIndex, 1);
+      }
+    }
+  }
+
+  return {
+    method: method ?? "GET",
+    url,
+    headers: headers.length ? headers : [row()],
+    body,
+    auth: auth ?? { type: "none" }
+  };
 }
 
 function formatBytes(bytes?: number) {
@@ -578,6 +790,174 @@ function RowEditor({
   );
 }
 
+const AUTH_TYPES: { value: RequestAuth["type"]; label: string }[] = [
+  { value: "none", label: "No auth" },
+  { value: "bearer", label: "Bearer token" },
+  { value: "basic", label: "Basic auth" },
+  { value: "apiKey", label: "API key" }
+];
+
+function AuthEditor({
+  auth,
+  onChange
+}: {
+  auth: RequestAuth;
+  onChange: (auth: RequestAuth) => void;
+}) {
+  const fieldClass =
+    "h-11 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm outline-none placeholder:text-zinc-400 focus:border-emerald-600";
+  const labelClass =
+    "mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-500";
+
+  function selectType(type: RequestAuth["type"]) {
+    if (type === auth.type) {
+      return;
+    }
+    if (type === "none") {
+      onChange({ type: "none" });
+    } else if (type === "bearer") {
+      onChange({ type: "bearer", token: "" });
+    } else if (type === "basic") {
+      onChange({ type: "basic", username: "", password: "" });
+    } else {
+      onChange({ type: "apiKey", key: "", value: "", in: "header" });
+    }
+  }
+
+  return (
+    <div className="space-y-4 rounded-md border border-zinc-200 bg-white p-4">
+      <div>
+        <label className={labelClass} htmlFor="auth-type">
+          Auth type
+        </label>
+        <select
+          id="auth-type"
+          className={fieldClass}
+          value={auth.type}
+          onChange={(event) =>
+            selectType(event.currentTarget.value as RequestAuth["type"])
+          }
+        >
+          {AUTH_TYPES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {auth.type === "none" && (
+        <p className="text-sm text-zinc-500">
+          This request will be sent without an Authorization header.
+        </p>
+      )}
+
+      {auth.type === "bearer" && (
+        <div>
+          <label className={labelClass} htmlFor="auth-token">
+            Token
+          </label>
+          <input
+            id="auth-token"
+            className={`${fieldClass} font-mono`}
+            placeholder="{{token}}"
+            value={auth.token}
+            onChange={(event) =>
+              onChange({ type: "bearer", token: event.currentTarget.value })
+            }
+          />
+        </div>
+      )}
+
+      {auth.type === "basic" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className={labelClass} htmlFor="auth-username">
+              Username
+            </label>
+            <input
+              id="auth-username"
+              className={fieldClass}
+              value={auth.username}
+              onChange={(event) =>
+                onChange({ ...auth, username: event.currentTarget.value })
+              }
+            />
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="auth-password">
+              Password
+            </label>
+            <input
+              id="auth-password"
+              type="password"
+              className={fieldClass}
+              value={auth.password}
+              onChange={(event) =>
+                onChange({ ...auth, password: event.currentTarget.value })
+              }
+            />
+          </div>
+        </div>
+      )}
+
+      {auth.type === "apiKey" && (
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className={labelClass} htmlFor="auth-key">
+                Key
+              </label>
+              <input
+                id="auth-key"
+                className={fieldClass}
+                placeholder="X-API-Key"
+                value={auth.key}
+                onChange={(event) =>
+                  onChange({ ...auth, key: event.currentTarget.value })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="auth-value">
+                Value
+              </label>
+              <input
+                id="auth-value"
+                className={`${fieldClass} font-mono`}
+                placeholder="{{apiKey}}"
+                value={auth.value}
+                onChange={(event) =>
+                  onChange({ ...auth, value: event.currentTarget.value })
+                }
+              />
+            </div>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="auth-in">
+              Add to
+            </label>
+            <select
+              id="auth-in"
+              className={fieldClass}
+              value={auth.in}
+              onChange={(event) =>
+                onChange({
+                  ...auth,
+                  in: event.currentTarget.value as "header" | "query"
+                })
+              }
+            >
+              <option value="header">Header</option>
+              <option value="query">Query param</option>
+            </select>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmptyResponse() {
   return (
     <div className="grid min-h-[360px] place-items-center rounded-md border border-dashed border-zinc-300 bg-white">
@@ -892,6 +1272,9 @@ export function App() {
   const [response, setResponse] = useState<ResponseState>(null);
   const [isSending, setIsSending] = useState(false);
   const [savedNotice, setSavedNotice] = useState("");
+  const [curlOpen, setCurlOpen] = useState(false);
+  const [curlText, setCurlText] = useState("");
+  const [curlError, setCurlError] = useState("");
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -929,6 +1312,28 @@ export function App() {
 
   function updateActive(patch: Partial<RequestDraft>) {
     setActiveRequest((current) => ({ ...current, ...patch }));
+  }
+
+  function importCurl() {
+    const parsed = parseCurl(curlText);
+    if (!parsed) {
+      setCurlError("Could not parse that. Paste a command starting with curl.");
+      return;
+    }
+
+    setActiveRequest((current) => ({
+      ...current,
+      method: parsed.method ?? current.method,
+      url: parsed.url ?? current.url,
+      headers: parsed.headers ?? current.headers,
+      body: parsed.body ?? current.body,
+      auth: parsed.auth ?? { type: "none" }
+    }));
+    setResponse(null);
+    setCurlText("");
+    setCurlError("");
+    setCurlOpen(false);
+    setRequestTab(parsed.auth && parsed.auth.type !== "none" ? "Auth" : "Headers");
   }
 
   function saveRequest() {
@@ -979,14 +1384,22 @@ export function App() {
     setIsSending(true);
     setResponse(null);
 
-    const preparedUrl = buildUrl(
+    const resolvedUrl = buildUrl(
       interpolate(activeRequest.url, state.environment),
       resolveRows(activeRequest.params, state.environment)
     );
-    const preparedHeaders = resolveRows(
+    const resolvedHeaders = resolveRows(
       activeRequest.headers,
       state.environment
     );
+    const withAuth = applyAuth(
+      activeRequest.auth,
+      resolvedHeaders,
+      resolvedUrl,
+      state.environment
+    );
+    const preparedUrl = withAuth.url;
+    const preparedHeaders = withAuth.headers;
     const preparedBody = interpolate(activeRequest.body, state.environment);
 
     const result = await sendRequest({
@@ -1343,10 +1756,67 @@ export function App() {
                     />
                   </p>
                 </div>
-                <span className={`method-chip ${methodClass(activeRequest.method)}`}>
-                  {activeRequest.method}
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 active:translate-y-px"
+                    type="button"
+                    onClick={() => {
+                      setCurlError("");
+                      setCurlOpen((open) => !open);
+                    }}
+                  >
+                    <DownloadIcon className="size-3.5" />
+                    Import cURL
+                  </button>
+                  <span
+                    className={`method-chip ${methodClass(activeRequest.method)}`}
+                  >
+                    {activeRequest.method}
+                  </span>
+                </div>
               </div>
+
+              {curlOpen && (
+                <div className="mb-4 rounded-md border border-zinc-200 bg-white p-3">
+                  <label className="sr-only" htmlFor="curl-input">
+                    cURL command
+                  </label>
+                  <textarea
+                    id="curl-input"
+                    className="min-h-[96px] w-full resize-y rounded-md border border-zinc-200 bg-zinc-50 p-3 font-mono text-xs leading-5 outline-none placeholder:text-zinc-400 focus:border-emerald-600 focus:bg-white"
+                    spellCheck={false}
+                    placeholder="curl https://api.example.com/users -H 'Authorization: Bearer ...'"
+                    value={curlText}
+                    onChange={(event) => setCurlText(event.currentTarget.value)}
+                  />
+                  {curlError ? (
+                    <p className="mt-2 text-xs font-medium text-rose-600">
+                      {curlError}
+                    </p>
+                  ) : null}
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <button
+                      className="inline-flex h-8 items-center rounded-md px-3 text-xs font-medium text-zinc-500 transition hover:text-zinc-800"
+                      type="button"
+                      onClick={() => {
+                        setCurlOpen(false);
+                        setCurlError("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-700 px-3 text-xs font-semibold text-white transition hover:bg-emerald-800 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-60"
+                      type="button"
+                      aria-label="Run cURL import"
+                      disabled={!curlText.trim()}
+                      onClick={importCurl}
+                    >
+                      Import
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="mb-4 flex rounded-md border border-zinc-200 bg-white p-1">
                 {REQUEST_TABS.map((tab) => (
@@ -1360,6 +1830,7 @@ export function App() {
                   >
                     {tab === "Params" && <RowsIcon className="size-4" />}
                     {tab === "Headers" && <ArchiveIcon className="size-4" />}
+                    {tab === "Auth" && <LockClosedIcon className="size-4" />}
                     {tab === "Body" && <CodeIcon className="size-4" />}
                     {tab === "Env" && <GearIcon className="size-4" />}
                     {tab}
@@ -1378,6 +1849,13 @@ export function App() {
                 <RowEditor
                   rows={activeRequest.headers}
                   onRowsChange={(headers) => updateActive({ headers })}
+                />
+              )}
+
+              {requestTab === "Auth" && (
+                <AuthEditor
+                  auth={activeRequest.auth ?? { type: "none" }}
+                  onChange={(auth) => updateActive({ auth })}
                 />
               )}
 
