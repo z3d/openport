@@ -13,6 +13,7 @@ import {
   GearIcon,
   GlobeIcon,
   PaperPlaneIcon,
+  PlusCircledIcon,
   PlusIcon,
   RowsIcon,
   TableIcon,
@@ -490,8 +491,12 @@ function AppSidebar({
   onSelectRequest,
   onSelectCollection,
   onNewRequest,
+  onNewCollection,
+  onDeleteRequest,
+  onDeleteCollection,
   onToggleCollections,
-  onLoadHistory
+  onLoadHistory,
+  onClearHistory
 }: {
   collections: Collection[];
   history: HistoryItem[];
@@ -501,8 +506,12 @@ function AppSidebar({
   onSelectRequest: (collectionId: string, request: RequestDraft) => void;
   onSelectCollection: (collection: Collection) => void;
   onNewRequest: (collectionId?: string) => void;
+  onNewCollection: () => void;
+  onDeleteRequest: (collectionId: string, requestId: string) => void;
+  onDeleteCollection: (collectionId: string) => void;
   onToggleCollections: () => void;
   onLoadHistory: (item: HistoryItem) => void;
+  onClearHistory: () => void;
 }) {
   return (
     <aside className="flex min-h-[100dvh] flex-col border-r border-zinc-200 bg-[#fbfbfa]">
@@ -535,6 +544,9 @@ function AppSidebar({
           <FileTextIcon className="size-4" />
           Collections
         </button>
+        <IconButton label="New collection" onClick={onNewCollection}>
+          <PlusCircledIcon className="size-4" />
+        </IconButton>
         <IconButton
           label="New request"
           onClick={() => onNewRequest(activeCollectionId)}
@@ -568,6 +580,12 @@ function AppSidebar({
                 >
                   <PlusIcon className="size-4" />
                 </IconButton>
+                <IconButton
+                  label={`Delete ${collection.name}`}
+                  onClick={() => onDeleteCollection(collection.id)}
+                >
+                  <TrashIcon className="size-4" />
+                </IconButton>
               </div>
               <div className="space-y-1">
                 {collection.requests.length === 0 ? (
@@ -576,23 +594,38 @@ function AppSidebar({
                   </div>
                 ) : (
                   collection.requests.map((request) => (
-                    <button
-                      className={`sidebar-item ${
-                        activeRequestId === request.id ? "sidebar-item-active" : ""
-                      }`}
+                    <div
+                      className="group flex items-center gap-1"
                       key={request.id}
-                      type="button"
-                      onClick={() => onSelectRequest(collection.id, request)}
                     >
-                      <span
-                        className={`method-chip ${methodClass(request.method)}`}
+                      <button
+                        className={`sidebar-item min-w-0 flex-1 ${
+                          activeRequestId === request.id
+                            ? "sidebar-item-active"
+                            : ""
+                        }`}
+                        type="button"
+                        onClick={() => onSelectRequest(collection.id, request)}
                       >
-                        {request.method}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-left">
-                        {request.name}
-                      </span>
-                    </button>
+                        <span
+                          className={`method-chip ${methodClass(request.method)}`}
+                        >
+                          {request.method}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {request.name}
+                        </span>
+                      </button>
+                      <button
+                        className="grid size-8 shrink-0 place-items-center rounded-md text-zinc-400 opacity-0 transition hover:text-rose-600 focus-visible:opacity-100 active:translate-y-px group-hover:opacity-100"
+                        type="button"
+                        title={`Delete ${request.name}`}
+                        aria-label={`Delete ${request.name}`}
+                        onClick={() => onDeleteRequest(collection.id, request.id)}
+                      >
+                        <TrashIcon className="size-4" />
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -601,9 +634,20 @@ function AppSidebar({
       </div>
 
       <div className="border-t border-zinc-200 px-2 py-3">
-        <div className="mb-2 flex items-center gap-2 px-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-500">
-          <CounterClockwiseClockIcon className="size-4" />
-          History
+        <div className="mb-2 flex items-center justify-between px-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-500">
+          <span className="flex items-center gap-2">
+            <CounterClockwiseClockIcon className="size-4" />
+            History
+          </span>
+          {history.length > 0 && (
+            <button
+              className="rounded px-1.5 py-0.5 text-[11px] font-medium normal-case tracking-normal text-zinc-400 transition hover:bg-zinc-100 hover:text-rose-600 active:translate-y-px"
+              type="button"
+              onClick={onClearHistory}
+            >
+              Clear
+            </button>
+          )}
         </div>
         <div className="max-h-60 space-y-1 overflow-y-auto">
           {history.length === 0 ? (
@@ -660,6 +704,22 @@ export function App() {
       setActiveCollectionId(state.collections[0]?.id ?? "");
     }
   }, [activeCollectionId, state.collections]);
+
+  const canSend = activeRequest.url.trim().length > 0;
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        if (!isSending && canSend) {
+          void handleSend();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canSend, isSending, activeRequest, state.environment]);
 
   const resolvedPreview = useMemo(() => {
     const resolvedUrl = interpolate(activeRequest.url, state.environment);
@@ -813,6 +873,92 @@ export function App() {
     }
   }
 
+  function deleteRequest(collectionId: string, requestId: string) {
+    setState((current) => ({
+      ...current,
+      collections: current.collections.map((collection) =>
+        collection.id === collectionId
+          ? {
+              ...collection,
+              requests: collection.requests.filter(
+                (item) => item.id !== requestId
+              )
+            }
+          : collection
+      )
+    }));
+
+    if (activeRequest.id === requestId) {
+      startNewRequest(collectionId);
+    }
+  }
+
+  function createCollection() {
+    const existing = new Set(
+      state.collections.map((collection) => collection.name)
+    );
+    let index = state.collections.length + 1;
+    let name = `Collection ${index}`;
+    while (existing.has(name)) {
+      index += 1;
+      name = `Collection ${index}`;
+    }
+
+    const collection: Collection = { id: uid("col"), name, requests: [] };
+
+    setState((current) => ({
+      ...current,
+      collections: [...current.collections, collection]
+    }));
+    setActiveCollectionId(collection.id);
+    setCollectionsExpanded(true);
+    startNewRequest(collection.id);
+  }
+
+  function deleteCollection(collectionId: string) {
+    const target = state.collections.find(
+      (collection) => collection.id === collectionId
+    );
+
+    if (!target) {
+      return;
+    }
+
+    if (
+      target.requests.length > 0 &&
+      !window.confirm(
+        `Delete "${target.name}" and its ${target.requests.length} request(s)?`
+      )
+    ) {
+      return;
+    }
+
+    const remaining = state.collections.filter(
+      (collection) => collection.id !== collectionId
+    );
+
+    setState((current) => ({
+      ...current,
+      collections: current.collections.filter(
+        (collection) => collection.id !== collectionId
+      )
+    }));
+
+    if (activeCollectionId === collectionId) {
+      const next = remaining[0];
+      if (next) {
+        selectCollection(next);
+      } else {
+        setActiveCollectionId("");
+        startNewRequest("");
+      }
+    }
+  }
+
+  function clearHistory() {
+    setState((current) => ({ ...current, history: [] }));
+  }
+
   return (
     <div className="min-h-[100dvh] bg-[#f7f7f5] text-zinc-950">
       <div className="grid min-h-[100dvh] grid-cols-1 lg:grid-cols-[282px_minmax(0,1fr)]">
@@ -824,6 +970,10 @@ export function App() {
           history={state.history}
           onLoadHistory={loadHistory}
           onNewRequest={startNewRequest}
+          onNewCollection={createCollection}
+          onDeleteRequest={deleteRequest}
+          onDeleteCollection={deleteCollection}
+          onClearHistory={clearHistory}
           onSelectCollection={selectCollection}
           onToggleCollections={() =>
             setCollectionsExpanded((isExpanded) => !isExpanded)
@@ -897,7 +1047,8 @@ export function App() {
               <button
                 className="inline-flex h-10 items-center gap-2 rounded-md bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-60"
                 type="button"
-                disabled={isSending}
+                title="Send request (⌘/Ctrl + Enter)"
+                disabled={isSending || !canSend}
                 onClick={handleSend}
               >
                 <PaperPlaneIcon className="size-4" />

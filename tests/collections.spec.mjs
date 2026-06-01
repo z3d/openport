@@ -34,3 +34,30 @@ test("collections header plus starts a request in the active collection", async 
     })
   ).toBeVisible();
 });
+
+test("a request can be deleted from the sidebar", async ({ page }) => {
+  await expect(
+    page.getByRole("button", { exact: true, name: "Scratchpad 2" })
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Delete Echo anything" }).click();
+
+  await expect(
+    page.getByRole("button", { exact: true, name: "POST Echo anything" })
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { exact: true, name: "Scratchpad 1" })
+  ).toBeVisible();
+});
+
+test("a new collection can be created", async ({ page }) => {
+  await expect(
+    page.getByRole("button", { exact: true, name: "Scratchpad 2" })
+  ).toBeVisible();
+
+  await page.getByRole("button", { exact: true, name: "New collection" }).click();
+
+  await expect(
+    page.getByRole("button", { exact: true, name: "Collection 2 0" })
+  ).toBeVisible();
+});
