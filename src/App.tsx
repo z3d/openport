@@ -58,6 +58,13 @@ type RequestDraft = {
   headers: KeyValueRow[];
   body: string;
   auth?: RequestAuth;
+  environmentId?: string;
+};
+
+type Environment = {
+  id: string;
+  name: string;
+  variables: KeyValueRow[];
 };
 
 type Collection = {
@@ -79,7 +86,8 @@ type HistoryItem = {
 type PersistedState = {
   collections: Collection[];
   history: HistoryItem[];
-  environment: KeyValueRow[];
+  environments: Environment[];
+  activeEnvironmentId: string;
 };
 
 type ResponseState = OpenPortResponse | null;
@@ -128,11 +136,20 @@ function requestDraft(overrides: Partial<RequestDraft> = {}): RequestDraft {
   };
 }
 
+const DEFAULT_ENV_ID = "env-default";
+
 const defaultState: PersistedState = {
-  environment: [
-    row("baseUrl", "https://httpbin.org"),
-    row("token", "", false)
+  environments: [
+    {
+      id: DEFAULT_ENV_ID,
+      name: "Default",
+      variables: [
+        row("baseUrl", "https://httpbin.org"),
+        row("token", "", false)
+      ]
+    }
   ],
+  activeEnvironmentId: DEFAULT_ENV_ID,
   collections: [
     {
       id: uid("col"),
@@ -161,6 +178,37 @@ const defaultState: PersistedState = {
   history: []
 };
 
+function migrateEnvironments(parsed: {
+  environments?: Environment[];
+  environment?: KeyValueRow[];
+  activeEnvironmentId?: string;
+}): { environments: Environment[]; activeEnvironmentId: string } {
+  if (Array.isArray(parsed.environments) && parsed.environments.length) {
+    const environments = parsed.environments;
+    const activeEnvironmentId =
+      environments.find((item) => item.id === parsed.activeEnvironmentId)?.id ??
+      environments[0].id;
+    return { environments, activeEnvironmentId };
+  }
+
+  if (Array.isArray(parsed.environment) && parsed.environment.length) {
+    const environment: Environment = {
+      id: DEFAULT_ENV_ID,
+      name: "Default",
+      variables: parsed.environment
+    };
+    return {
+      environments: [environment],
+      activeEnvironmentId: environment.id
+    };
+  }
+
+  return {
+    environments: defaultState.environments,
+    activeEnvironmentId: defaultState.activeEnvironmentId
+  };
+}
+
 function loadState(): PersistedState {
   const raw = localStorage.getItem(STORAGE_KEY);
 
@@ -169,15 +217,15 @@ function loadState(): PersistedState {
   }
 
   try {
-    const parsed = JSON.parse(raw) as PersistedState;
+    const parsed = JSON.parse(raw) as PersistedState & {
+      environment?: KeyValueRow[];
+    };
     return {
       collections: parsed.collections?.length
         ? parsed.collections
         : defaultState.collections,
       history: parsed.history ?? [],
-      environment: parsed.environment?.length
-        ? parsed.environment
-        : defaultState.environment
+      ...migrateEnvironments(parsed)
     };
   } catch {
     return defaultState;
@@ -958,6 +1006,102 @@ function AuthEditor({
   );
 }
 
+function EnvironmentEditor({
+  environments,
+  activeEnvironmentId,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete,
+  onVariablesChange
+}: {
+  environments: Environment[];
+  activeEnvironmentId: string;
+  onSelect: (id: string) => void;
+  onCreate: () => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
+  onVariablesChange: (id: string, variables: KeyValueRow[]) => void;
+}) {
+  const [renaming, setRenaming] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const active =
+    environments.find((item) => item.id === activeEnvironmentId) ??
+    environments[0];
+
+  if (!active) {
+    return null;
+  }
+
+  function commitRename() {
+    onRename(active.id, draftName);
+    setRenaming(false);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-1">
+        {renaming ? (
+          <input
+            aria-label="Environment name"
+            autoFocus
+            className="h-9 min-w-0 flex-1 rounded-md border border-emerald-600 bg-white px-2 text-sm font-medium outline-none"
+            value={draftName}
+            onChange={(event) => setDraftName(event.currentTarget.value)}
+            onBlur={commitRename}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitRename();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <select
+            aria-label="Edit environment"
+            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-2 text-sm font-medium outline-none focus:border-emerald-600"
+            value={active.id}
+            onChange={(event) => onSelect(event.currentTarget.value)}
+          >
+            {environments.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <IconButton
+          label="Rename environment"
+          onClick={() => {
+            setDraftName(active.name);
+            setRenaming(true);
+          }}
+        >
+          <Pencil1Icon className="size-4" />
+        </IconButton>
+        <IconButton label="New environment" onClick={onCreate}>
+          <PlusIcon className="size-4" />
+        </IconButton>
+        <IconButton
+          label="Delete environment"
+          onClick={() => onDelete(active.id)}
+        >
+          <TrashIcon className="size-4" />
+        </IconButton>
+      </div>
+      <RowEditor
+        rows={active.variables}
+        valuePlaceholder="Variable value"
+        secrets
+        onRowsChange={(variables) => onVariablesChange(active.id, variables)}
+      />
+    </div>
+  );
+}
+
 function EmptyResponse() {
   return (
     <div className="grid min-h-[360px] place-items-center rounded-md border border-dashed border-zinc-300 bg-white">
@@ -1001,7 +1145,10 @@ function AppSidebar({
   onLoadHistory,
   onClearHistory,
   onExport,
-  onImport
+  onImport,
+  environments,
+  activeEnvironmentId,
+  onSelectEnvironment
 }: {
   collections: Collection[];
   history: HistoryItem[];
@@ -1020,6 +1167,9 @@ function AppSidebar({
   onClearHistory: () => void;
   onExport: () => void;
   onImport: (file: File) => void;
+  environments: Environment[];
+  activeEnvironmentId: string;
+  onSelectEnvironment: (id: string) => void;
 }) {
   const importInputRef = useRef<HTMLInputElement>(null);
   const [editingCollectionId, setEditingCollectionId] = useState<string | null>(
@@ -1051,6 +1201,30 @@ function AppSidebar({
             </h1>
             <p className="text-xs text-zinc-500">Local API workbench</p>
           </div>
+        </div>
+      </div>
+
+      <div className="border-b border-zinc-200 px-4 py-3">
+        <label
+          className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-400"
+          htmlFor="active-environment"
+        >
+          Environment
+        </label>
+        <div className="flex items-center gap-2">
+          <GlobeIcon className="size-4 shrink-0 text-zinc-400" />
+          <select
+            id="active-environment"
+            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-emerald-600"
+            value={activeEnvironmentId}
+            onChange={(event) => onSelectEnvironment(event.currentTarget.value)}
+          >
+            {environments.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -1276,6 +1450,29 @@ export function App() {
   const [curlText, setCurlText] = useState("");
   const [curlError, setCurlError] = useState("");
 
+  const activeEnvironmentId = state.environments.some(
+    (item) => item.id === state.activeEnvironmentId
+  )
+    ? state.activeEnvironmentId
+    : state.environments[0]?.id ?? "";
+
+  const effectiveEnvironmentId =
+    activeRequest.environmentId &&
+    state.environments.some((item) => item.id === activeRequest.environmentId)
+      ? activeRequest.environmentId
+      : activeEnvironmentId;
+
+  const activeVariables = useMemo(
+    () =>
+      state.environments.find((item) => item.id === effectiveEnvironmentId)
+        ?.variables ?? [],
+    [state.environments, effectiveEnvironmentId]
+  );
+
+  const activeEnvironmentName =
+    state.environments.find((item) => item.id === activeEnvironmentId)?.name ??
+    "";
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state]);
@@ -1300,15 +1497,15 @@ export function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canSend, isSending, activeRequest, state.environment]);
+  }, [canSend, isSending, activeRequest, activeVariables]);
 
   const resolvedPreview = useMemo(() => {
-    const resolvedUrl = interpolate(activeRequest.url, state.environment);
+    const resolvedUrl = interpolate(activeRequest.url, activeVariables);
     return buildUrl(
       resolvedUrl,
-      resolveRows(activeRequest.params, state.environment)
+      resolveRows(activeRequest.params, activeVariables)
     );
-  }, [activeRequest.params, activeRequest.url, state.environment]);
+  }, [activeRequest.params, activeRequest.url, activeVariables]);
 
   function updateActive(patch: Partial<RequestDraft>) {
     setActiveRequest((current) => ({ ...current, ...patch }));
@@ -1385,22 +1582,19 @@ export function App() {
     setResponse(null);
 
     const resolvedUrl = buildUrl(
-      interpolate(activeRequest.url, state.environment),
-      resolveRows(activeRequest.params, state.environment)
+      interpolate(activeRequest.url, activeVariables),
+      resolveRows(activeRequest.params, activeVariables)
     );
-    const resolvedHeaders = resolveRows(
-      activeRequest.headers,
-      state.environment
-    );
+    const resolvedHeaders = resolveRows(activeRequest.headers, activeVariables);
     const withAuth = applyAuth(
       activeRequest.auth,
       resolvedHeaders,
       resolvedUrl,
-      state.environment
+      activeVariables
     );
     const preparedUrl = withAuth.url;
     const preparedHeaders = withAuth.headers;
-    const preparedBody = interpolate(activeRequest.body, state.environment);
+    const preparedBody = interpolate(activeRequest.body, activeVariables);
 
     const result = await sendRequest({
       method: activeRequest.method,
@@ -1586,6 +1780,67 @@ export function App() {
     setState((current) => ({ ...current, history: [] }));
   }
 
+  function selectActiveEnvironment(id: string) {
+    setState((current) => ({ ...current, activeEnvironmentId: id }));
+  }
+
+  function updateEnvironmentVariables(id: string, variables: KeyValueRow[]) {
+    setState((current) => ({
+      ...current,
+      environments: current.environments.map((environment) =>
+        environment.id === id ? { ...environment, variables } : environment
+      )
+    }));
+  }
+
+  function createEnvironment() {
+    const id = uid("env");
+    setState((current) => ({
+      ...current,
+      environments: [
+        ...current.environments,
+        {
+          id,
+          name: `Environment ${current.environments.length + 1}`,
+          variables: [row()]
+        }
+      ],
+      activeEnvironmentId: id
+    }));
+  }
+
+  function renameEnvironment(id: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return;
+    }
+    setState((current) => ({
+      ...current,
+      environments: current.environments.map((environment) =>
+        environment.id === id ? { ...environment, name: trimmed } : environment
+      )
+    }));
+  }
+
+  function deleteEnvironment(id: string) {
+    setState((current) => {
+      if (current.environments.length <= 1) {
+        return current;
+      }
+      const environments = current.environments.filter(
+        (environment) => environment.id !== id
+      );
+      return {
+        ...current,
+        environments,
+        activeEnvironmentId:
+          current.activeEnvironmentId === id
+            ? environments[0].id
+            : current.activeEnvironmentId
+      };
+    });
+  }
+
   function exportData() {
     const blob = new Blob([JSON.stringify(state, null, 2)], {
       type: "application/json"
@@ -1613,10 +1868,13 @@ export function App() {
             ? parsed.collections
             : defaultState.collections,
           history: Array.isArray(parsed.history) ? parsed.history : [],
-          environment:
-            Array.isArray(parsed.environment) && parsed.environment.length
-              ? parsed.environment
-              : defaultState.environment
+          ...migrateEnvironments(
+            parsed as {
+              environments?: Environment[];
+              environment?: KeyValueRow[];
+              activeEnvironmentId?: string;
+            }
+          )
         };
 
         setState(next);
@@ -1656,6 +1914,9 @@ export function App() {
           onClearHistory={clearHistory}
           onExport={exportData}
           onImport={importData}
+          environments={state.environments}
+          activeEnvironmentId={activeEnvironmentId}
+          onSelectEnvironment={selectActiveEnvironment}
           onSelectCollection={selectCollection}
           onToggleCollections={() =>
             setCollectionsExpanded((isExpanded) => !isExpanded)
@@ -1752,11 +2013,34 @@ export function App() {
                   >
                     <UrlPreview
                       url={activeRequest.url}
-                      environment={state.environment}
+                      environment={activeVariables}
                     />
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <label className="sr-only" htmlFor="request-environment">
+                    Request environment
+                  </label>
+                  <select
+                    id="request-environment"
+                    className="h-8 max-w-[150px] rounded-md border border-zinc-300 bg-white px-2 text-xs text-zinc-600 outline-none focus:border-emerald-600"
+                    title="Environment used for this request"
+                    value={activeRequest.environmentId ?? ""}
+                    onChange={(event) =>
+                      updateActive({
+                        environmentId: event.currentTarget.value || undefined
+                      })
+                    }
+                  >
+                    <option value="">
+                      Active env{activeEnvironmentName ? ` (${activeEnvironmentName})` : ""}
+                    </option>
+                    {state.environments.map((environment) => (
+                      <option key={environment.id} value={environment.id}>
+                        {environment.name}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 active:translate-y-px"
                     type="button"
@@ -1880,13 +2164,14 @@ export function App() {
               )}
 
               {requestTab === "Env" && (
-                <RowEditor
-                  rows={state.environment}
-                  valuePlaceholder="Variable value"
-                  secrets
-                  onRowsChange={(environment) =>
-                    setState((current) => ({ ...current, environment }))
-                  }
+                <EnvironmentEditor
+                  environments={state.environments}
+                  activeEnvironmentId={activeEnvironmentId}
+                  onSelect={selectActiveEnvironment}
+                  onCreate={createEnvironment}
+                  onRename={renameEnvironment}
+                  onDelete={deleteEnvironment}
+                  onVariablesChange={updateEnvironmentVariables}
                 />
               )}
             </div>

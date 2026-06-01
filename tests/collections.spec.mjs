@@ -152,6 +152,55 @@ test("a bearer token auth can be configured", async ({ page }) => {
   await expect(page.getByLabel("Token")).toHaveValue("{{token}}");
 });
 
+test("environments are first class and switchable", async ({ page }) => {
+  await page.getByRole("button", { name: "Env" }).click();
+
+  await expect(page.getByLabel("Key").first()).toHaveValue("baseUrl");
+
+  await page.getByRole("button", { name: "New environment" }).click();
+
+  // new environment becomes active and starts empty
+  await expect(page.getByLabel("Key").first()).toHaveValue("");
+  await page.getByLabel("Key").first().fill("stagingOnly");
+
+  // switching the global environment swaps the variable set
+  await page
+    .getByLabel("Environment", { exact: true })
+    .selectOption({ label: "Default" });
+  await expect(page.getByLabel("Key").first()).toHaveValue("baseUrl");
+
+  await page
+    .getByLabel("Environment", { exact: true })
+    .selectOption({ label: "Environment 2" });
+  await expect(page.getByLabel("Key").first()).toHaveValue("stagingOnly");
+});
+
+test("a request can override the active environment", async ({ page }) => {
+  await page.getByRole("button", { name: "Env" }).click();
+  await page.getByRole("button", { name: "New environment" }).click();
+  await page.getByLabel("Key").first().fill("baseUrl");
+  await page
+    .getByLabel("Variable value")
+    .first()
+    .fill("https://staging.example.com");
+
+  // make Default the active environment again
+  await page
+    .getByLabel("Environment", { exact: true })
+    .selectOption({ label: "Default" });
+
+  await page.getByLabel("URL", { exact: true }).fill("{{baseUrl}}/ping");
+
+  // override just this request to the staging environment
+  await page
+    .getByLabel("Request environment")
+    .selectOption({ label: "Environment 2" });
+
+  await expect(
+    page.locator('span[title="baseUrl = https://staging.example.com"]')
+  ).toBeVisible();
+});
+
 test("an environment variable can be masked and revealed", async ({ page }) => {
   await page.getByRole("button", { name: "Env" }).click();
 
