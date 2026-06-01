@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityLogIcon,
   ArchiveIcon,
@@ -8,14 +8,15 @@ import {
   CodeIcon,
   CopyIcon,
   CounterClockwiseClockIcon,
+  DownloadIcon,
   ExclamationTriangleIcon,
   FileTextIcon,
   GearIcon,
   GlobeIcon,
   PaperPlaneIcon,
-  PlusCircledIcon,
   PlusIcon,
   RowsIcon,
+  UploadIcon,
   TableIcon,
   TrashIcon
 } from "@radix-ui/react-icons";
@@ -320,6 +321,57 @@ function methodClass(method: HttpMethod) {
   }
 }
 
+function UrlPreview({
+  url,
+  environment
+}: {
+  url: string;
+  environment: KeyValueRow[];
+}) {
+  const segments: React.ReactNode[] = [];
+  const pattern = /\{\{\s*([\w.-]+)\s*\}\}/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+
+  while ((match = pattern.exec(url)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push(<span key={key++}>{url.slice(lastIndex, match.index)}</span>);
+    }
+
+    const name = match[1];
+    const found = environment.find(
+      (item) => item.enabled && item.key.trim() === name
+    );
+
+    segments.push(
+      <span
+        key={key++}
+        className={`rounded px-1 ${
+          found
+            ? "bg-emerald-100 text-emerald-800"
+            : "bg-rose-100 text-rose-700"
+        }`}
+        title={
+          found
+            ? `${name} = ${found.value || "(empty)"}`
+            : `${name} is not defined`
+        }
+      >
+        {`{{${name}}}`}
+      </span>
+    );
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < url.length) {
+    segments.push(<span key={key++}>{url.slice(lastIndex)}</span>);
+  }
+
+  return <>{segments}</>;
+}
+
 function StatusPill({ response }: { response: ResponseState }) {
   if (!response) {
     return <span className="status-pill border-zinc-200 text-zinc-500">Idle</span>;
@@ -496,7 +548,9 @@ function AppSidebar({
   onDeleteCollection,
   onToggleCollections,
   onLoadHistory,
-  onClearHistory
+  onClearHistory,
+  onExport,
+  onImport
 }: {
   collections: Collection[];
   history: HistoryItem[];
@@ -512,7 +566,10 @@ function AppSidebar({
   onToggleCollections: () => void;
   onLoadHistory: (item: HistoryItem) => void;
   onClearHistory: () => void;
+  onExport: () => void;
+  onImport: (file: File) => void;
 }) {
+  const importInputRef = useRef<HTMLInputElement>(null);
   return (
     <aside className="flex min-h-[100dvh] flex-col border-r border-zinc-200 bg-[#fbfbfa]">
       <div className="border-b border-zinc-200 px-4 py-4">
@@ -545,12 +602,6 @@ function AppSidebar({
           Collections
         </button>
         <IconButton label="New collection" onClick={onNewCollection}>
-          <PlusCircledIcon className="size-4" />
-        </IconButton>
-        <IconButton
-          label="New request"
-          onClick={() => onNewRequest(activeCollectionId)}
-        >
           <PlusIcon className="size-4" />
         </IconButton>
       </div>
@@ -673,6 +724,38 @@ function AppSidebar({
             ))
           )}
         </div>
+      </div>
+
+      <div className="flex items-center gap-2 border-t border-zinc-200 px-3 py-3">
+        <input
+          ref={importInputRef}
+          className="hidden"
+          type="file"
+          accept="application/json,.json"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) {
+              onImport(file);
+            }
+            event.currentTarget.value = "";
+          }}
+        />
+        <button
+          className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 active:translate-y-px"
+          type="button"
+          onClick={() => importInputRef.current?.click()}
+        >
+          <UploadIcon className="size-4" />
+          Import
+        </button>
+        <button
+          className="inline-flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 active:translate-y-px"
+          type="button"
+          onClick={onExport}
+        >
+          <DownloadIcon className="size-4" />
+          Export
+        </button>
       </div>
     </aside>
   );
@@ -959,6 +1042,58 @@ export function App() {
     setState((current) => ({ ...current, history: [] }));
   }
 
+  function exportData() {
+    const blob = new Blob([JSON.stringify(state, null, 2)], {
+      type: "application/json"
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `openport-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function importData(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as Partial<PersistedState>;
+
+        if (!Array.isArray(parsed.collections)) {
+          throw new Error("missing collections");
+        }
+
+        const next: PersistedState = {
+          collections: parsed.collections.length
+            ? parsed.collections
+            : defaultState.collections,
+          history: Array.isArray(parsed.history) ? parsed.history : [],
+          environment:
+            Array.isArray(parsed.environment) && parsed.environment.length
+              ? parsed.environment
+              : defaultState.environment
+        };
+
+        setState(next);
+
+        const firstCollection = next.collections[0];
+        setActiveCollectionId(firstCollection?.id ?? "");
+        setCollectionsExpanded(true);
+        if (firstCollection?.requests[0]) {
+          setActiveRequest(cloneRequest(firstCollection.requests[0]));
+        } else {
+          startNewRequest(firstCollection?.id ?? "");
+        }
+        setResponse(null);
+        setRequestTab("Params");
+      } catch {
+        window.alert("Could not import: the file is not valid OpenPort JSON.");
+      }
+    };
+    reader.readAsText(file);
+  }
+
   return (
     <div className="min-h-[100dvh] bg-[#f7f7f5] text-zinc-950">
       <div className="grid min-h-[100dvh] grid-cols-1 lg:grid-cols-[282px_minmax(0,1fr)]">
@@ -974,6 +1109,8 @@ export function App() {
           onDeleteRequest={deleteRequest}
           onDeleteCollection={deleteCollection}
           onClearHistory={clearHistory}
+          onExport={exportData}
+          onImport={importData}
           onSelectCollection={selectCollection}
           onToggleCollections={() =>
             setCollectionsExpanded((isExpanded) => !isExpanded)
@@ -1064,8 +1201,14 @@ export function App() {
                   <h2 className="text-sm font-semibold text-zinc-950">
                     Request
                   </h2>
-                  <p className="mt-1 truncate font-mono text-xs text-zinc-500">
-                    {resolvedPreview}
+                  <p
+                    className="mt-1 truncate font-mono text-xs text-zinc-500"
+                    title={resolvedPreview}
+                  >
+                    <UrlPreview
+                      url={activeRequest.url}
+                      environment={state.environment}
+                    />
                   </p>
                 </div>
                 <span className={`method-chip ${methodClass(activeRequest.method)}`}>

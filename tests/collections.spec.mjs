@@ -6,14 +6,16 @@ test.beforeEach(async ({ page }) => {
   await page.reload();
 });
 
-test("collections header plus starts a request in the active collection", async ({
+test("the collection plus starts a request in that collection", async ({
   page
 }) => {
   await expect(
     page.getByRole("button", { exact: true, name: "Scratchpad 2" })
   ).toBeVisible();
 
-  await page.getByRole("button", { exact: true, name: "New request" }).click();
+  await page
+    .getByRole("button", { exact: true, name: "New request in Scratchpad" })
+    .click();
 
   await expect(page.getByLabel("Request name")).toHaveValue(
     "Untitled request"
@@ -59,5 +61,48 @@ test("a new collection can be created", async ({ page }) => {
 
   await expect(
     page.getByRole("button", { exact: true, name: "Collection 2 0" })
+  ).toBeVisible();
+});
+
+test("import loads collections from a file", async ({ page }) => {
+  await expect(
+    page.getByRole("button", { exact: true, name: "Scratchpad 2" })
+  ).toBeVisible();
+
+  const payload = JSON.stringify({
+    collections: [
+      {
+        id: "col-imported",
+        name: "Imported",
+        requests: [
+          {
+            id: "req-imported",
+            name: "Imported call",
+            method: "GET",
+            url: "{{baseUrl}}/get",
+            params: [],
+            headers: [],
+            body: ""
+          }
+        ]
+      }
+    ],
+    history: [],
+    environment: [
+      { id: "env-1", key: "baseUrl", value: "https://example.com", enabled: true }
+    ]
+  });
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "openport.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(payload)
+  });
+
+  await expect(
+    page.getByRole("button", { exact: true, name: "Imported 1" })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { exact: true, name: "GET Imported call" })
   ).toBeVisible();
 });
