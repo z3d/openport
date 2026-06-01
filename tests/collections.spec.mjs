@@ -122,3 +122,16 @@ test("import loads collections from a file", async ({ page }) => {
     page.getByRole("button", { exact: true, name: "GET Imported call" })
   ).toBeVisible();
 });
+
+test("an environment variable can be masked and revealed", async ({ page }) => {
+  await page.getByRole("button", { name: "Env" }).click();
+
+  const firstValue = page.getByLabel("Variable value").first();
+  await expect(firstValue).toHaveAttribute("type", "text");
+
+  await page.getByRole("button", { name: "Mark as secret" }).first().click();
+  await expect(firstValue).toHaveAttribute("type", "password");
+
+  await page.getByRole("button", { name: "Reveal value" }).click();
+  await expect(firstValue).toHaveAttribute("type", "text");
+});

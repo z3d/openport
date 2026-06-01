@@ -10,9 +10,13 @@ import {
   CounterClockwiseClockIcon,
   DownloadIcon,
   ExclamationTriangleIcon,
+  EyeClosedIcon,
+  EyeOpenIcon,
   FileTextIcon,
   GearIcon,
   GlobeIcon,
+  LockClosedIcon,
+  LockOpen1Icon,
   PaperPlaneIcon,
   Pencil1Icon,
   PlusIcon,
@@ -36,6 +40,7 @@ type KeyValueRow = {
   key: string;
   value: string;
   enabled: boolean;
+  secret?: boolean;
 };
 
 type RequestDraft = {
@@ -355,7 +360,9 @@ function UrlPreview({
         }`}
         title={
           found
-            ? `${name} = ${found.value || "(empty)"}`
+            ? `${name} = ${
+                found.secret ? "••••••" : found.value || "(empty)"
+              }`
             : `${name} is not defined`
         }
       >
@@ -428,12 +435,20 @@ function IconButton({
 function RowEditor({
   rows,
   onRowsChange,
-  valuePlaceholder = "Value"
+  valuePlaceholder = "Value",
+  secrets = false
 }: {
   rows: KeyValueRow[];
   onRowsChange: (rows: KeyValueRow[]) => void;
   valuePlaceholder?: string;
+  secrets?: boolean;
 }) {
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+
+  function toggleReveal(id: string) {
+    setRevealed((current) => ({ ...current, [id]: !current[id] }));
+  }
+
   function updateRow(id: string, patch: Partial<KeyValueRow>) {
     onRowsChange(
       rows.map((item) => (item.id === id ? { ...item, ...patch } : item))
@@ -476,15 +491,69 @@ function RowEditor({
               value={item.key}
               onChange={(event) => updateRow(item.id, { key: event.target.value })}
             />
-            <input
-              aria-label={valuePlaceholder}
-              className="h-11 border-r border-zinc-100 bg-transparent px-3 text-sm outline-none placeholder:text-zinc-400 focus:bg-emerald-50/40"
-              placeholder={valuePlaceholder}
-              value={item.value}
-              onChange={(event) =>
-                updateRow(item.id, { value: event.target.value })
-              }
-            />
+            <div className="flex h-11 items-center border-r border-zinc-100">
+              <input
+                aria-label={valuePlaceholder}
+                className="h-11 min-w-0 flex-1 bg-transparent px-3 text-sm outline-none placeholder:text-zinc-400 focus:bg-emerald-50/40"
+                placeholder={valuePlaceholder}
+                type={
+                  secrets && item.secret && !revealed[item.id]
+                    ? "password"
+                    : "text"
+                }
+                value={item.value}
+                onChange={(event) =>
+                  updateRow(item.id, { value: event.target.value })
+                }
+              />
+              {secrets ? (
+                <div className="flex items-center pr-1">
+                  {item.secret ? (
+                    <button
+                      className="grid size-8 place-items-center text-zinc-400 transition hover:text-zinc-700 active:translate-y-px"
+                      type="button"
+                      title={revealed[item.id] ? "Hide value" : "Reveal value"}
+                      aria-label={
+                        revealed[item.id] ? "Hide value" : "Reveal value"
+                      }
+                      onClick={() => toggleReveal(item.id)}
+                    >
+                      {revealed[item.id] ? (
+                        <EyeOpenIcon className="size-4" />
+                      ) : (
+                        <EyeClosedIcon className="size-4" />
+                      )}
+                    </button>
+                  ) : null}
+                  <button
+                    className={`grid size-8 place-items-center transition active:translate-y-px ${
+                      item.secret
+                        ? "text-emerald-700 hover:text-emerald-800"
+                        : "text-zinc-400 hover:text-zinc-700"
+                    }`}
+                    type="button"
+                    title={item.secret ? "Unmark secret" : "Mark as secret"}
+                    aria-label={item.secret ? "Unmark secret" : "Mark as secret"}
+                    onClick={() => {
+                      const nextSecret = !item.secret;
+                      updateRow(item.id, { secret: nextSecret });
+                      if (!nextSecret) {
+                        setRevealed((current) => ({
+                          ...current,
+                          [item.id]: false
+                        }));
+                      }
+                    }}
+                  >
+                    {item.secret ? (
+                      <LockClosedIcon className="size-4" />
+                    ) : (
+                      <LockOpen1Icon className="size-4" />
+                    )}
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <button
               className="grid size-11 place-items-center text-zinc-400 transition hover:text-rose-600 active:translate-y-px"
               type="button"
@@ -1336,6 +1405,7 @@ export function App() {
                 <RowEditor
                   rows={state.environment}
                   valuePlaceholder="Variable value"
+                  secrets
                   onRowsChange={(environment) =>
                     setState((current) => ({ ...current, environment }))
                   }
