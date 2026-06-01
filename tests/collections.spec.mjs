@@ -64,6 +64,22 @@ test("a new collection can be created", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("a collection can be renamed", async ({ page }) => {
+  await expect(
+    page.getByRole("button", { exact: true, name: "Scratchpad 2" })
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Rename Scratchpad" }).click();
+
+  const input = page.getByLabel("Collection name");
+  await input.fill("My APIs");
+  await input.press("Enter");
+
+  await expect(
+    page.getByRole("button", { exact: true, name: "My APIs 2" })
+  ).toBeVisible();
+});
+
 test("import loads collections from a file", async ({ page }) => {
   await expect(
     page.getByRole("button", { exact: true, name: "Scratchpad 2" })

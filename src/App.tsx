@@ -14,6 +14,7 @@ import {
   GearIcon,
   GlobeIcon,
   PaperPlaneIcon,
+  Pencil1Icon,
   PlusIcon,
   RowsIcon,
   UploadIcon,
@@ -544,6 +545,7 @@ function AppSidebar({
   onSelectCollection,
   onNewRequest,
   onNewCollection,
+  onRenameCollection,
   onDeleteRequest,
   onDeleteCollection,
   onToggleCollections,
@@ -561,6 +563,7 @@ function AppSidebar({
   onSelectCollection: (collection: Collection) => void;
   onNewRequest: (collectionId?: string) => void;
   onNewCollection: () => void;
+  onRenameCollection: (collectionId: string, name: string) => void;
   onDeleteRequest: (collectionId: string, requestId: string) => void;
   onDeleteCollection: (collectionId: string) => void;
   onToggleCollections: () => void;
@@ -570,6 +573,22 @@ function AppSidebar({
   onImport: (file: File) => void;
 }) {
   const importInputRef = useRef<HTMLInputElement>(null);
+  const [editingCollectionId, setEditingCollectionId] = useState<string | null>(
+    null
+  );
+  const [draftName, setDraftName] = useState("");
+
+  function startRename(collection: Collection) {
+    setEditingCollectionId(collection.id);
+    setDraftName(collection.name);
+  }
+
+  function commitRename() {
+    if (editingCollectionId) {
+      onRenameCollection(editingCollectionId, draftName);
+    }
+    setEditingCollectionId(null);
+  }
   return (
     <aside className="flex min-h-[100dvh] flex-col border-r border-zinc-200 bg-[#fbfbfa]">
       <div className="border-b border-zinc-200 px-4 py-4">
@@ -611,20 +630,47 @@ function AppSidebar({
           collections.map((collection) => (
             <div className="mb-4" key={collection.id}>
               <div className="mb-1 flex items-center gap-1">
-                <button
-                  className={`flex min-h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 text-left text-xs font-semibold transition hover:bg-zinc-100 active:translate-y-px ${
-                    activeCollectionId === collection.id
-                      ? "bg-zinc-100 text-zinc-950"
-                      : "text-zinc-500"
-                  }`}
-                  type="button"
-                  onClick={() => onSelectCollection(collection)}
+                {editingCollectionId === collection.id ? (
+                  <input
+                    aria-label="Collection name"
+                    autoFocus
+                    className="h-8 min-w-0 flex-1 rounded-md border border-emerald-600 bg-white px-2 text-xs font-semibold text-zinc-950 outline-none"
+                    value={draftName}
+                    onChange={(event) => setDraftName(event.currentTarget.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitRename();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setEditingCollectionId(null);
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className={`flex min-h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 text-left text-xs font-semibold transition hover:bg-zinc-100 active:translate-y-px ${
+                      activeCollectionId === collection.id
+                        ? "bg-zinc-100 text-zinc-950"
+                        : "text-zinc-500"
+                    }`}
+                    type="button"
+                    onClick={() => onSelectCollection(collection)}
+                    onDoubleClick={() => startRename(collection)}
+                  >
+                    <span className="min-w-0 truncate">{collection.name}</span>
+                    <span className="font-mono text-[11px] text-zinc-400">
+                      {collection.requests.length}
+                    </span>
+                  </button>
+                )}
+                <IconButton
+                  label={`Rename ${collection.name}`}
+                  onClick={() => startRename(collection)}
                 >
-                  <span className="min-w-0 truncate">{collection.name}</span>
-                  <span className="font-mono text-[11px] text-zinc-400">
-                    {collection.requests.length}
-                  </span>
-                </button>
+                  <Pencil1Icon className="size-4" />
+                </IconButton>
                 <IconButton
                   label={`New request in ${collection.name}`}
                   onClick={() => onNewRequest(collection.id)}
@@ -998,6 +1044,22 @@ export function App() {
     startNewRequest(collection.id);
   }
 
+  function renameCollection(collectionId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    setState((current) => ({
+      ...current,
+      collections: current.collections.map((collection) =>
+        collection.id === collectionId
+          ? { ...collection, name: trimmed }
+          : collection
+      )
+    }));
+  }
+
   function deleteCollection(collectionId: string) {
     const target = state.collections.find(
       (collection) => collection.id === collectionId
@@ -1106,6 +1168,7 @@ export function App() {
           onLoadHistory={loadHistory}
           onNewRequest={startNewRequest}
           onNewCollection={createCollection}
+          onRenameCollection={renameCollection}
           onDeleteRequest={deleteRequest}
           onDeleteCollection={deleteCollection}
           onClearHistory={clearHistory}
