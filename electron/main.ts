@@ -172,6 +172,72 @@ ipcMain.handle("http:send", async (_event, request: ClientRequest) => {
   }
 });
 
+let oauthWindowSeq = 0;
+
+ipcMain.handle(
+  "oauth:authorize",
+  (_event, options: { authUrl: string; redirectUri: string }) => {
+    return new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const parent = BrowserWindow.getFocusedWindow() ?? undefined;
+      oauthWindowSeq += 1;
+      const authWindow = new BrowserWindow({
+        width: 600,
+        height: 760,
+        parent,
+        modal: Boolean(parent),
+        title: "Authorize",
+        autoHideMenuBar: true,
+        backgroundColor: "#ffffff",
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          partition: `oauth-${oauthWindowSeq}`
+        }
+      });
+
+      const finish = (action: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        action();
+        if (!authWindow.isDestroyed()) {
+          authWindow.destroy();
+        }
+      };
+
+      const handleUrl = (event: Electron.Event, url: string) => {
+        if (url.startsWith(options.redirectUri)) {
+          event.preventDefault();
+          finish(() => resolve(url));
+        }
+      };
+
+      authWindow.webContents.on("will-redirect", handleUrl);
+      authWindow.webContents.on("will-navigate", handleUrl);
+
+      authWindow.on("closed", () => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("Authorization window was closed before completing."));
+        }
+      });
+
+      authWindow.loadURL(options.authUrl).catch((error: unknown) => {
+        finish(() =>
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("Could not open the authorization URL.")
+          )
+        );
+      });
+    });
+  }
+);
+
 app.whenReady().then(() => {
   registerAppProtocol();
   createWindow();

@@ -43,11 +43,43 @@ type KeyValueRow = {
   secret?: boolean;
 };
 
+type OAuth2GrantType =
+  | "client_credentials"
+  | "password"
+  | "authorization_code"
+  | "authorization_code_pkce";
+
+type OAuth2Token = {
+  accessToken: string;
+  tokenType?: string;
+  refreshToken?: string;
+  scope?: string;
+  expiresAt?: number;
+  obtainedAt: number;
+};
+
+type OAuth2Auth = {
+  type: "oauth2";
+  grantType: OAuth2GrantType;
+  authUrl: string;
+  accessTokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scope: string;
+  username: string;
+  password: string;
+  redirectUri: string;
+  clientAuth: "body" | "basic";
+  headerPrefix: string;
+  token?: OAuth2Token;
+};
+
 type RequestAuth =
   | { type: "none" }
   | { type: "bearer"; token: string }
   | { type: "basic"; username: string; password: string }
-  | { type: "apiKey"; key: string; value: string; in: "header" | "query" };
+  | { type: "apiKey"; key: string; value: string; in: "header" | "query" }
+  | OAuth2Auth;
 
 type RequestDraft = {
   id: string;
@@ -306,6 +338,17 @@ function applyAuth(
       `${resolve(auth.username)}:${resolve(auth.password)}`
     );
     nextHeaders.push(row("Authorization", `Basic ${encoded}`));
+    return { headers: nextHeaders, url };
+  }
+
+  if (auth.type === "oauth2") {
+    const accessToken = auth.token?.accessToken?.trim();
+    if (accessToken) {
+      const prefix = (auth.headerPrefix || "Bearer").trim();
+      nextHeaders.push(
+        row("Authorization", prefix ? `${prefix} ${accessToken}` : accessToken)
+      );
+    }
     return { headers: nextHeaders, url };
   }
 
@@ -568,6 +611,338 @@ async function sendRequest(request: OpenPortRequest): Promise<OpenPortResponse> 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function randomUrlSafe(length = 64): string {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes).slice(0, length);
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+type OAuthTokenResult =
+  | { ok: true; token: OAuth2Token }
+  | { ok: false; error: string };
+
+function parseTokenResponse(body: string): OAuth2Token | null {
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data.access_token !== "string") {
+    return null;
+  }
+  const expiresIn = Number(data.expires_in);
+  return {
+    accessToken: data.access_token,
+    tokenType: typeof data.token_type === "string" ? data.token_type : undefined,
+    refreshToken:
+      typeof data.refresh_token === "string" ? data.refresh_token : undefined,
+    scope: typeof data.scope === "string" ? data.scope : undefined,
+    expiresAt:
+      Number.isFinite(expiresIn) && expiresIn > 0
+        ? Date.now() + expiresIn * 1000
+        : undefined,
+    obtainedAt: Date.now()
+  };
+}
+
+async function requestToken(
+  auth: OAuth2Auth,
+  params: Record<string, string>,
+  resolve: (value: string) => string
+): Promise<OAuthTokenResult> {
+  const tokenUrl = resolve(auth.accessTokenUrl).trim();
+  if (!tokenUrl) {
+    return { ok: false, error: "An access token URL is required." };
+  }
+
+  const form = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) {
+      form.set(key, value);
+    }
+  });
+
+  const headers: KeyValueRow[] = [
+    row("Content-Type", "application/x-www-form-urlencoded"),
+    row("Accept", "application/json")
+  ];
+
+  const clientId = resolve(auth.clientId).trim();
+  const clientSecret = resolve(auth.clientSecret);
+  if (auth.clientAuth === "basic") {
+    headers.push(
+      row("Authorization", `Basic ${btoa(`${clientId}:${clientSecret}`)}`)
+    );
+  } else {
+    if (clientId) {
+      form.set("client_id", clientId);
+    }
+    if (clientSecret) {
+      form.set("client_secret", clientSecret);
+    }
+  }
+
+  const response = await sendRequest({
+    method: "POST",
+    url: tokenUrl,
+    headers,
+    body: form.toString(),
+    timeoutMs: 60000
+  });
+
+  if (!response.ok) {
+    return { ok: false, error: response.error };
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return {
+      ok: false,
+      error: `Token endpoint returned ${response.status}. ${response.body.slice(0, 300)}`
+    };
+  }
+
+  const token = parseTokenResponse(response.body);
+  if (!token) {
+    return {
+      ok: false,
+      error: "Token response did not contain an access_token."
+    };
+  }
+  return { ok: true, token };
+}
+
+async function fetchOAuthToken(
+  auth: OAuth2Auth,
+  resolve: (value: string) => string,
+  refreshToken?: string
+): Promise<OAuthTokenResult> {
+  const scope = resolve(auth.scope).trim();
+
+  if (refreshToken) {
+    const refreshed = await requestToken(
+      auth,
+      { grant_type: "refresh_token", refresh_token: refreshToken, scope },
+      resolve
+    );
+    if (refreshed.ok) {
+      if (!refreshed.token.refreshToken) {
+        refreshed.token.refreshToken = refreshToken;
+      }
+      return refreshed;
+    }
+    // Refresh failed — fall through to a full grant below.
+  }
+
+  if (auth.grantType === "client_credentials") {
+    return requestToken(
+      auth,
+      { grant_type: "client_credentials", scope },
+      resolve
+    );
+  }
+
+  if (auth.grantType === "password") {
+    return requestToken(
+      auth,
+      {
+        grant_type: "password",
+        username: resolve(auth.username),
+        password: resolve(auth.password),
+        scope
+      },
+      resolve
+    );
+  }
+
+  // Authorization code (optionally with PKCE) — needs the desktop popup.
+  if (!window.openPort?.authorize) {
+    return {
+      ok: false,
+      error: "Browser-based OAuth requires the OpenPort desktop app."
+    };
+  }
+
+  const redirectUri = resolve(auth.redirectUri).trim();
+  if (!redirectUri) {
+    return {
+      ok: false,
+      error: "A redirect URL is required for the authorization code flow."
+    };
+  }
+
+  let authUrl: URL;
+  try {
+    authUrl = new URL(resolve(auth.authUrl).trim());
+  } catch {
+    return { ok: false, error: "The authorization URL is not valid." };
+  }
+
+  const state = randomUrlSafe(24);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", resolve(auth.clientId).trim());
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("state", state);
+  if (scope) {
+    authUrl.searchParams.set("scope", scope);
+  }
+
+  let verifier = "";
+  if (auth.grantType === "authorization_code_pkce") {
+    verifier = randomUrlSafe(64);
+    authUrl.searchParams.set("code_challenge", await pkceChallenge(verifier));
+    authUrl.searchParams.set("code_challenge_method", "S256");
+  }
+
+  let callbackUrl: string;
+  try {
+    callbackUrl = await window.openPort.authorize({
+      authUrl: authUrl.toString(),
+      redirectUri
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Error ? error.message : "Authorization was cancelled."
+    };
+  }
+
+  let callback: URL;
+  try {
+    callback = new URL(callbackUrl);
+  } catch {
+    return { ok: false, error: "Received an invalid authorization callback." };
+  }
+
+  const returnedError = callback.searchParams.get("error");
+  if (returnedError) {
+    return { ok: false, error: `Authorization failed: ${returnedError}` };
+  }
+  const returnedState = callback.searchParams.get("state");
+  if (returnedState && returnedState !== state) {
+    return { ok: false, error: "Authorization state mismatch; aborting." };
+  }
+  const code = callback.searchParams.get("code");
+  if (!code) {
+    return {
+      ok: false,
+      error: "Authorization response did not include a code."
+    };
+  }
+
+  const exchange: Record<string, string> = {
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri
+  };
+  if (verifier) {
+    exchange.code_verifier = verifier;
+  }
+  return requestToken(auth, exchange, resolve);
+}
+
+function oauthTokenIsFresh(token?: OAuth2Token): boolean {
+  if (!token?.accessToken) {
+    return false;
+  }
+  if (!token.expiresAt) {
+    return true;
+  }
+  // Refresh a minute early to avoid racing expiry.
+  return token.expiresAt - Date.now() > 60_000;
+}
+
+function maskCredential(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "(empty)";
+  }
+  if (trimmed.includes("{{")) {
+    return trimmed;
+  }
+  if (trimmed.length <= 8) {
+    return "••••";
+  }
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
+}
+
+function maskAuthHeaderValue(value: string): string {
+  const idx = value.indexOf(" ");
+  if (idx > 0) {
+    return `${value.slice(0, idx)} ${maskCredential(value.slice(idx + 1))}`;
+  }
+  return maskCredential(value);
+}
+
+type AuthPreview = { header: string; value: string; pending: boolean } | null;
+
+function previewAuth(
+  auth: RequestAuth | undefined,
+  url: string,
+  environment: KeyValueRow[]
+): AuthPreview {
+  if (!auth || auth.type === "none") {
+    return null;
+  }
+
+  if (auth.type === "oauth2") {
+    const prefix = (auth.headerPrefix || "Bearer").trim() || "Bearer";
+    if (auth.token?.accessToken) {
+      return {
+        header: "Authorization",
+        value: `${prefix} ${maskCredential(auth.token.accessToken)}`,
+        pending: false
+      };
+    }
+    return {
+      header: "Authorization",
+      value: `${prefix} «token fetched on send»`,
+      pending: true
+    };
+  }
+
+  const applied = applyAuth(auth, [], url, environment);
+  const authHeader = applied.headers.find(
+    (header) => header.key.toLowerCase() === "authorization"
+  );
+  if (authHeader) {
+    return {
+      header: "Authorization",
+      value: maskAuthHeaderValue(authHeader.value),
+      pending: false
+    };
+  }
+  if (applied.headers.length > 0) {
+    const header = applied.headers[0];
+    return {
+      header: header.key,
+      value: maskCredential(header.value),
+      pending: false
+    };
+  }
+  if (applied.url !== url) {
+    return { header: "Query param", value: "appended to URL", pending: false };
+  }
+  return null;
 }
 
 function methodClass(method: HttpMethod) {
@@ -842,15 +1217,48 @@ const AUTH_TYPES: { value: RequestAuth["type"]; label: string }[] = [
   { value: "none", label: "No auth" },
   { value: "bearer", label: "Bearer token" },
   { value: "basic", label: "Basic auth" },
-  { value: "apiKey", label: "API key" }
+  { value: "apiKey", label: "API key" },
+  { value: "oauth2", label: "OAuth 2.0" }
 ];
+
+const OAUTH2_GRANTS: { value: OAuth2GrantType; label: string }[] = [
+  { value: "authorization_code", label: "Authorization Code" },
+  { value: "authorization_code_pkce", label: "Authorization Code (PKCE)" },
+  { value: "client_credentials", label: "Client Credentials" },
+  { value: "password", label: "Password Credentials" }
+];
+
+function defaultOAuth2(): OAuth2Auth {
+  return {
+    type: "oauth2",
+    grantType: "authorization_code",
+    authUrl: "",
+    accessTokenUrl: "",
+    clientId: "",
+    clientSecret: "",
+    scope: "",
+    username: "",
+    password: "",
+    redirectUri: "https://oauth.openport.dev/callback",
+    clientAuth: "body",
+    headerPrefix: "Bearer"
+  };
+}
 
 function AuthEditor({
   auth,
-  onChange
+  onChange,
+  oauthBusy = false,
+  oauthError = "",
+  onFetchToken,
+  onClearToken
 }: {
   auth: RequestAuth;
   onChange: (auth: RequestAuth) => void;
+  oauthBusy?: boolean;
+  oauthError?: string;
+  onFetchToken?: () => void;
+  onClearToken?: () => void;
 }) {
   const fieldClass =
     "h-11 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm outline-none placeholder:text-zinc-400 focus:border-emerald-600";
@@ -867,8 +1275,16 @@ function AuthEditor({
       onChange({ type: "bearer", token: "" });
     } else if (type === "basic") {
       onChange({ type: "basic", username: "", password: "" });
+    } else if (type === "oauth2") {
+      onChange(defaultOAuth2());
     } else {
       onChange({ type: "apiKey", key: "", value: "", in: "header" });
+    }
+  }
+
+  function updateOAuth(patch: Partial<OAuth2Auth>) {
+    if (auth.type === "oauth2") {
+      onChange({ ...auth, ...patch });
     }
   }
 
@@ -999,6 +1415,234 @@ function AuthEditor({
               <option value="header">Header</option>
               <option value="query">Query param</option>
             </select>
+          </div>
+        </div>
+      )}
+
+      {auth.type === "oauth2" && (
+        <div className="space-y-3">
+          <div>
+            <label className={labelClass} htmlFor="oauth-grant">
+              Grant type
+            </label>
+            <select
+              id="oauth-grant"
+              className={fieldClass}
+              value={auth.grantType}
+              onChange={(event) =>
+                updateOAuth({
+                  grantType: event.currentTarget.value as OAuth2GrantType
+                })
+              }
+            >
+              {OAUTH2_GRANTS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {(auth.grantType === "authorization_code" ||
+            auth.grantType === "authorization_code_pkce") && (
+            <>
+              <div>
+                <label className={labelClass} htmlFor="oauth-auth-url">
+                  Auth URL
+                </label>
+                <input
+                  id="oauth-auth-url"
+                  className={`${fieldClass} font-mono`}
+                  placeholder="https://example.com/oauth/authorize"
+                  value={auth.authUrl}
+                  onChange={(event) =>
+                    updateOAuth({ authUrl: event.currentTarget.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="oauth-redirect">
+                  Redirect URL
+                </label>
+                <input
+                  id="oauth-redirect"
+                  className={`${fieldClass} font-mono`}
+                  value={auth.redirectUri}
+                  onChange={(event) =>
+                    updateOAuth({ redirectUri: event.currentTarget.value })
+                  }
+                />
+              </div>
+            </>
+          )}
+
+          <div>
+            <label className={labelClass} htmlFor="oauth-token-url">
+              Access Token URL
+            </label>
+            <input
+              id="oauth-token-url"
+              className={`${fieldClass} font-mono`}
+              placeholder="https://example.com/oauth/token"
+              value={auth.accessTokenUrl}
+              onChange={(event) =>
+                updateOAuth({ accessTokenUrl: event.currentTarget.value })
+              }
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className={labelClass} htmlFor="oauth-client-id">
+                Client ID
+              </label>
+              <input
+                id="oauth-client-id"
+                className={`${fieldClass} font-mono`}
+                placeholder="{{clientId}}"
+                value={auth.clientId}
+                onChange={(event) =>
+                  updateOAuth({ clientId: event.currentTarget.value })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="oauth-client-secret">
+                Client Secret
+              </label>
+              <input
+                id="oauth-client-secret"
+                type="password"
+                className={`${fieldClass} font-mono`}
+                placeholder="{{clientSecret}}"
+                value={auth.clientSecret}
+                onChange={(event) =>
+                  updateOAuth({ clientSecret: event.currentTarget.value })
+                }
+              />
+            </div>
+          </div>
+
+          {auth.grantType === "password" && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className={labelClass} htmlFor="oauth-username">
+                  Username
+                </label>
+                <input
+                  id="oauth-username"
+                  className={fieldClass}
+                  value={auth.username}
+                  onChange={(event) =>
+                    updateOAuth({ username: event.currentTarget.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="oauth-password">
+                  Password
+                </label>
+                <input
+                  id="oauth-password"
+                  type="password"
+                  className={fieldClass}
+                  value={auth.password}
+                  onChange={(event) =>
+                    updateOAuth({ password: event.currentTarget.value })
+                  }
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className={labelClass} htmlFor="oauth-scope">
+                Scope
+              </label>
+              <input
+                id="oauth-scope"
+                className={fieldClass}
+                placeholder="read write"
+                value={auth.scope}
+                onChange={(event) =>
+                  updateOAuth({ scope: event.currentTarget.value })
+                }
+              />
+            </div>
+            <div>
+              <label className={labelClass} htmlFor="oauth-client-auth">
+                Client authentication
+              </label>
+              <select
+                id="oauth-client-auth"
+                className={fieldClass}
+                value={auth.clientAuth}
+                onChange={(event) =>
+                  updateOAuth({
+                    clientAuth: event.currentTarget.value as "body" | "basic"
+                  })
+                }
+              >
+                <option value="body">Send client credentials in body</option>
+                <option value="basic">Send as Basic auth header</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-500">
+                  Current token
+                </p>
+                {auth.token?.accessToken ? (
+                  <>
+                    <p className="truncate font-mono text-xs text-zinc-700">
+                      {auth.token.accessToken.slice(0, 12)}…{" "}
+                      {auth.token.accessToken.slice(-6)}
+                    </p>
+                    <p className="text-[11px] text-zinc-500">
+                      {auth.token.expiresAt
+                        ? `Expires ${formatDateTime(
+                            new Date(auth.token.expiresAt).toISOString()
+                          )}`
+                        : "No expiry reported"}
+                      {auth.token.refreshToken ? " · refreshable" : ""}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-zinc-500">
+                    No token yet. It is fetched automatically on send.
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {auth.token?.accessToken && onClearToken && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-600 hover:border-zinc-300"
+                    onClick={onClearToken}
+                    disabled={oauthBusy}
+                  >
+                    Clear
+                  </button>
+                )}
+                {onFetchToken && (
+                  <button
+                    type="button"
+                    className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                    onClick={onFetchToken}
+                    disabled={oauthBusy}
+                  >
+                    {oauthBusy ? "Fetching…" : "Get New Token"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {oauthError && (
+              <p className="mt-2 text-xs text-rose-600">{oauthError}</p>
+            )}
           </div>
         </div>
       )}
@@ -1445,6 +2089,8 @@ export function App() {
     useState<(typeof RESPONSE_TABS)[number]>("Body");
   const [response, setResponse] = useState<ResponseState>(null);
   const [isSending, setIsSending] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [oauthError, setOauthError] = useState("");
   const [savedNotice, setSavedNotice] = useState("");
   const [curlOpen, setCurlOpen] = useState(false);
   const [curlText, setCurlText] = useState("");
@@ -1506,6 +2152,16 @@ export function App() {
       resolveRows(activeRequest.params, activeVariables)
     );
   }, [activeRequest.params, activeRequest.url, activeVariables]);
+
+  const authPreview = useMemo(
+    () =>
+      previewAuth(
+        activeRequest.auth,
+        interpolate(activeRequest.url, activeVariables),
+        activeVariables
+      ),
+    [activeRequest.auth, activeRequest.url, activeVariables]
+  );
 
   function updateActive(patch: Partial<RequestDraft>) {
     setActiveRequest((current) => ({ ...current, ...patch }));
@@ -1577,9 +2233,59 @@ export function App() {
     window.setTimeout(() => setSavedNotice(""), 1600);
   }
 
+  async function runOAuthFetch(
+    auth: OAuth2Auth,
+    useRefresh: boolean
+  ): Promise<{ ok: true; auth: OAuth2Auth } | { ok: false; error: string }> {
+    setOauthError("");
+    setOauthBusy(true);
+    const resolve = (value: string) => interpolate(value, activeVariables);
+    const refreshToken =
+      useRefresh && auth.token?.refreshToken
+        ? auth.token.refreshToken
+        : undefined;
+    const result = await fetchOAuthToken(auth, resolve, refreshToken);
+    setOauthBusy(false);
+    if (!result.ok) {
+      setOauthError(result.error);
+      return { ok: false, error: result.error };
+    }
+    const nextAuth: OAuth2Auth = { ...auth, token: result.token };
+    updateActive({ auth: nextAuth });
+    return { ok: true, auth: nextAuth };
+  }
+
+  function handleFetchToken() {
+    if (activeRequest.auth?.type === "oauth2") {
+      void runOAuthFetch(activeRequest.auth, false);
+    }
+  }
+
+  function handleClearToken() {
+    if (activeRequest.auth?.type === "oauth2") {
+      updateActive({ auth: { ...activeRequest.auth, token: undefined } });
+      setOauthError("");
+    }
+  }
+
   async function handleSend() {
     setIsSending(true);
     setResponse(null);
+
+    let auth = activeRequest.auth;
+    if (auth?.type === "oauth2" && !oauthTokenIsFresh(auth.token)) {
+      const obtained = await runOAuthFetch(auth, true);
+      if (!obtained.ok) {
+        setResponse({
+          ok: false,
+          error: `OAuth token request failed. ${obtained.error}`,
+          durationMs: 0
+        });
+        setIsSending(false);
+        return;
+      }
+      auth = obtained.auth;
+    }
 
     const resolvedUrl = buildUrl(
       interpolate(activeRequest.url, activeVariables),
@@ -1587,7 +2293,7 @@ export function App() {
     );
     const resolvedHeaders = resolveRows(activeRequest.headers, activeVariables);
     const withAuth = applyAuth(
-      activeRequest.auth,
+      auth,
       resolvedHeaders,
       resolvedUrl,
       activeVariables
@@ -2016,6 +2722,17 @@ export function App() {
                       environment={activeVariables}
                     />
                   </p>
+                  {authPreview && (
+                    <p
+                      className="mt-1 flex items-center gap-1 truncate font-mono text-[11px] text-zinc-400"
+                      title={`${authPreview.header}: ${authPreview.value}`}
+                    >
+                      <LockClosedIcon className="size-3 shrink-0" />
+                      <span className="truncate">
+                        {authPreview.header}: {authPreview.value}
+                      </span>
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <label className="sr-only" htmlFor="request-environment">
@@ -2140,6 +2857,10 @@ export function App() {
                 <AuthEditor
                   auth={activeRequest.auth ?? { type: "none" }}
                   onChange={(auth) => updateActive({ auth })}
+                  oauthBusy={oauthBusy}
+                  oauthError={oauthError}
+                  onFetchToken={handleFetchToken}
+                  onClearToken={handleClearToken}
                 />
               )}
 

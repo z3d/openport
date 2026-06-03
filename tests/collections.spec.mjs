@@ -152,6 +152,41 @@ test("a bearer token auth can be configured", async ({ page }) => {
   await expect(page.getByLabel("Token")).toHaveValue("{{token}}");
 });
 
+test("an oauth2 client credentials grant can be configured", async ({
+  page
+}) => {
+  await page.getByRole("button", { name: "Auth" }).click();
+
+  await page.getByLabel("Auth type").selectOption("oauth2");
+  await page.getByLabel("Grant type").selectOption("client_credentials");
+
+  // token-only grants hide the browser-redirect fields
+  await expect(page.getByLabel("Auth URL")).toHaveCount(0);
+
+  await page
+    .getByLabel("Access Token URL")
+    .fill("https://example.com/oauth/token");
+  await page.getByLabel("Client ID").fill("{{clientId}}");
+  await page.getByLabel("Scope").fill("read write");
+
+  await expect(page.getByLabel("Access Token URL")).toHaveValue(
+    "https://example.com/oauth/token"
+  );
+  await expect(page.getByRole("button", { name: "Get New Token" })).toBeVisible();
+});
+
+test("oauth2 authorization code grant reveals the redirect fields", async ({
+  page
+}) => {
+  await page.getByRole("button", { name: "Auth" }).click();
+
+  await page.getByLabel("Auth type").selectOption("oauth2");
+  await page.getByLabel("Grant type").selectOption("authorization_code");
+
+  await expect(page.getByLabel("Auth URL")).toBeVisible();
+  await expect(page.getByLabel("Redirect URL")).toBeVisible();
+});
+
 test("environments are first class and switchable", async ({ page }) => {
   await page.getByRole("button", { name: "Env" }).click();
 

@@ -15,5 +15,7 @@ type ClientRequest = {
 };
 
 contextBridge.exposeInMainWorld("openPort", {
-  sendRequest: (request: ClientRequest) => ipcRenderer.invoke("http:send", request)
+  sendRequest: (request: ClientRequest) => ipcRenderer.invoke("http:send", request),
+  authorize: (options: { authUrl: string; redirectUri: string }) =>
+    ipcRenderer.invoke("oauth:authorize", options)
 });

@@ -34,5 +34,9 @@ type OpenPortResponse =
 interface Window {
   openPort?: {
     sendRequest: (request: OpenPortRequest) => Promise<OpenPortResponse>;
+    authorize: (options: {
+      authUrl: string;
+      redirectUri: string;
+    }) => Promise<string>;
   };
 }
